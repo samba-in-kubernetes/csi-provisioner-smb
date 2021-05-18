@@ -17,58 +17,40 @@ limitations under the License.
 package provisioner
 
 import (
-	"fmt"
-	"os"
-	"sort"
-	"strconv"
-
-	"github.com/golang/protobuf/ptypes"
-
-	"github.com/golang/glog"
-	"github.com/pborman/uuid"
-	"golang.org/x/net/context"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"context"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	utilexec "k8s.io/utils/exec"
-)
-
-const (
-	deviceID           = "deviceID"
-	maxStorageCapacity = tib
-)
-
-type accessType int
-
-const (
-	mountAccess accessType = iota
-	blockAccess
+	"github.com/golang/glog"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type controllerServer struct {
 	caps   []*csi.ControllerServiceCapability
-	nodeID string
 }
 
-func NewControllerServer(nodeID string) *controllerServer {
+func NewControllerServer() *controllerServer {
 	return &controllerServer{
-		caps: getControllerServiceCapabilities(
-			[]csi.ControllerServiceCapability_RPC_Type{
-				csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
-			}),
-		nodeID: nodeID,
+		caps: []*csi.ControllerServiceCapability{{
+			Type: &csi.ControllerServiceCapability_Rpc{
+				Rpc: &csi.ControllerServiceCapability_RPC{
+					Type: csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
+				},
+			},
+		}},
 	}
 }
 
 func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-	if err := cs.validateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
-		glog.V(3).Infof("invalid create volume req: %v", req)
-		return nil, err
-	}
+	// TODO
+	//if err := cs.validateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
+	//	glog.V(3).Infof("invalid create volume req: %v", req)
+	//	return nil, err
+	//}
 
 	// Check arguments
-	if len(req.GetName()) == 0 {
+	name := req.GetName()
+	if len(name) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Name missing in request")
 	}
 	caps := req.GetVolumeCapabilities()
@@ -77,20 +59,19 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	}
 
 	// TODO: Check for access type mount
+	// only support RWX for now?
 
 	// Check if this is a request to create a volume from an other volume or snapshot
 	if req.GetVolumeContentSource() != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "cloning and snapshots are not supported")
 	}
 
-	// Check for maximum available capacity
+	// TODO: Check for maximum available capacity?
 	capacity := int64(req.GetCapacityRange().GetRequiredBytes())
-	if capacity >= maxStorageCapacity {
-		return nil, status.Errorf(codes.OutOfRange, "Requested capacity %d exceeds maximum allowed %d", capacity, maxStorageCapacity)
-	}
 
 	// Need to check for already existing volume name, and if found
 	// check for the requested capacity and already allocated capacity
+	/* TODO: check for existing volume, SmbShare.Spec.ShareName == name
 	if exVol, err := getVolumeByName(req.GetName()); err == nil {
 		// Since err is nil, it means the volume with the same name already exists
 		// need to check if the size of existing volume is the same as in new
@@ -107,38 +88,39 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 			},
 		}, nil
 	}
+	*/
 
-	volumeID := uuid.NewUUID().String()
-
-	vol, err := createSmbVolume(volumeID, req.GetName(), capacity, requestedAccessType)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to create volume %v: %v", volumeID, err)
+	var sc *string
+	param, ok := req.GetParameters()["storageClass"]
+	if ok {
+		sc = &param
 	}
-	glog.V(4).Infof("created volume %s at path %s", vol.VolID, vol.VolPath)
+
+	pvc := createPVC(capacity, sc)
+
+	vol, err := createSmbShare(name, pvc)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to create volume %q: %v", name, err)
+	}
+	glog.V(4).Infof("created volume %q: %v", name, *vol)
 
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
-			VolumeId:           volumeID,
-			CapacityBytes:      req.GetCapacityRange().GetRequiredBytes(),
-			VolumeContext:      req.GetParameters(),
+			VolumeId:      name,
+			CapacityBytes: req.GetCapacityRange().GetRequiredBytes(),
+			VolumeContext: req.GetParameters(),
 			// TODO: add reference to the SmbPvc and SmbService?
 		},
 	}, nil
 }
 
 func (cs *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
-	// Check arguments
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
 	}
 
-	if err := cs.validateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
-		glog.V(3).Infof("invalid delete volume req: %v", req)
-		return nil, err
-	}
-
 	volId := req.GetVolumeId()
-	if err := deleteHostpathVolume(volId); err != nil {
+	if err := deleteSmbShare(volId); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to delete volume %v: %v", volId, err)
 	}
 
@@ -162,9 +144,11 @@ func (cs *controllerServer) ValidateVolumeCapabilities(ctx context.Context, req 
 		return nil, status.Error(codes.InvalidArgument, req.VolumeId)
 	}
 
+	/*
 	if _, err := getVolumeByID(req.GetVolumeId()); err != nil {
 		return nil, status.Error(codes.NotFound, req.GetVolumeId())
 	}
+	*/
 
 	for _, cap := range req.GetVolumeCapabilities() {
 		if cap.GetBlock() != nil {
@@ -204,3 +188,14 @@ func (cs *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi
 	return nil, status.Error(codes.Unimplemented, "")
 }
 
+func (cs *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "")
+}
+
+func (cs *controllerServer) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshotRequest) (*csi.DeleteSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "")
+}
+
+func (cs *controllerServer) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRequest) (*csi.ListSnapshotsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "")
+}

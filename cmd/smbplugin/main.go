@@ -6,18 +6,22 @@ import (
 	"os"
 	"path"
 
-	sp "github.com/nixpanic/csi-provisioner-smb/internal/provisioner"
+	sp "github.com/samba-in-kubernetes/csi-provisioner-smb/internal/provisioner"
 )
 
 func init() {
 	flag.Set("logtostderr", "true")
 }
 
+const (
+	defaultDriverName = "csi.samba-operator.samba.org"
+)
+
 var (
 	endpoint          = flag.String("endpoint", "unix://tmp/csi.sock", "CSI endpoint")
-	driverName        = flag.String("drivername", "smb.csi.k8s.io", "name of the driver")
+	driverName        = flag.String("drivername", defaultDriverName, "name of the driver")
 	showVersion       = flag.Bool("version", false, "Show version.")
-	// Set by the build process
+	// TODO: Set by the build process
 	version = ""
 )
 
@@ -35,7 +39,7 @@ func main() {
 }
 
 func handle() {
-	driver, err := sp.NewSmbProvisionerDriver(*driverName, *nodeID, *endpoint, version)
+	driver, err := sp.NewSmbProvisionerDriver(*driverName, *endpoint, version)
 	if err != nil {
 		fmt.Printf("Failed to initialize driver: %s", err.Error())
 		os.Exit(1)

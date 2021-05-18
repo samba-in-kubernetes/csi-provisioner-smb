@@ -1,0 +1,4 @@
+smb-provisioner
+
+# do not track all vendored packages
+vendor/

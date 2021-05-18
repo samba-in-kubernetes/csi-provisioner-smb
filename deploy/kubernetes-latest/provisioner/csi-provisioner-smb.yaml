@@ -1,0 +1,50 @@
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: csi-provisioner-smb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: csi-provisioner-smb
+  template:
+    metadata:
+      labels:
+        app: csi-provisioner-smb
+    spec:
+      priorityClassName: system-cluster-critical
+      serviceAccount: csi-provisioner-smb
+      containers:
+        - name: csi-provisioner
+          image: k8s.gcr.io/sig-storage/csi-provisioner:v2.0.4
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v=5"
+            - "--timeout=150s"
+            - "--retry-interval-start=500ms"
+            - "--leader-election=true"
+          env:
+            - name: ADDRESS
+              value: unix:///csi/csi-provisioner.sock
+          imagePullPolicy: "IfNotPresent"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: smb
+          image: quay.io/nixpanic/csi-provisioner-smb:latest
+          args:
+            - "--endpoint=$(CSI_ENDPOINT)"
+            - "--v=5"
+            - "--drivername=csi.operator.samba.org"
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi-provisioner.sock
+          imagePullPolicy: "IfNotPresent"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          emptyDir:
+            medium: "Memory"

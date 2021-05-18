@@ -1,0 +1,16 @@
+# build container
+FROM golang:1.16 as builder
+
+ENV GOPATH=/build/go
+
+COPY . /build/src/github.com/samba-in-kubernetes/csi-provisioner-smb
+WORKDIR /build/src/github.com/samba-in-kubernetes/csi-provisioner-smb
+RUN make
+
+# container used in deployments
+FROM quay.io/centos/centos:latest
+
+COPY --from=builder /build/src/github.com/samba-in-kubernetes/csi-provisioner-smb/smb-provisioner /usr/local/bin/
+
+WORKDIR /
+ENTRYPOINT ["/usr/local/bin/smb-provisioner"]
